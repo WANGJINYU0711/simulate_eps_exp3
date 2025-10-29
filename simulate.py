@@ -117,7 +117,8 @@ class BernoulliEnv:
             for ell in self.tree.leaves:
                 acc[ell] += p_copy[ell]
 
-            prefix[tt - 1] = min(acc.values())
+            # prefix[tt - 1] = min(acc.values())
+            prefix[tt - 1] = acc[3]   # 基线固定为叶子3
         return prefix
 
 
@@ -131,7 +132,7 @@ def stable_softmax_weights(theta: np.ndarray, eta: float) -> np.ndarray:
         w = np.ones_like(theta)
         s = w.sum()
     p = w / s
-    p = np.maximum(p, 1e-8)  # 防止 0 概率
+    # p = np.maximum(p, 1e-8)  # 防止 0 概率
     p /= p.sum()
     return p
 
@@ -157,7 +158,7 @@ class NodeEXP3:
         return self.child_ids[idx], p, idx
 
     def update(self, chosen_index: int, observed_loss: float, local_prob: float):
-        local_prob = max(local_prob, 1e-8)
+        # local_prob = max(local_prob, 1e-8)
         ghat = observed_loss / local_prob
         self.theta[chosen_index] -= ghat
 
@@ -233,6 +234,8 @@ def time_average_regret_curve(runs=5, T=50000, pmin=0.4, eta=0.02, eps=0.05,
                 T=T, runs=runs, pmin=pmin, eta=eta, eps=eps, seed=seed
             )
         )
+    wandb.define_metric("regret/*",    step_metric="t_regret")
+    wandb.define_metric("baseline/*", step_metric="t_regret")   # ← 新增
 
     random.seed(seed); np.random.seed(seed)
     
@@ -271,7 +274,13 @@ def time_average_regret_curve(runs=5, T=50000, pmin=0.4, eta=0.02, eps=0.05,
             # 逐步记录（只在第一个 run 上记，减少日志量）
             if log_to_wandb and log_this:
                 key = "regret/eps" if algo == "eps-exp3" else "regret/exp3"
-                wandb.log({key: float(val), "t": int(t)}, step=int(t))
+                # 改成（新增 baseline 的时间平均成本）：
+                wandb.log({
+                    "t_regret": int(t),
+                    key: float(val),                              # 算法的 time-average regret
+                    "baseline/avg_cost": float(comp_prefix[t-1] / t)  # 基线：最优固定叶子的时间平均成本
+                })
+
         return np.array(regrets)
 
     # 多次独立运行求均值/方差。
@@ -280,33 +289,33 @@ def time_average_regret_curve(runs=5, T=50000, pmin=0.4, eta=0.02, eps=0.05,
     m_eps, s_eps = eps_runs.mean(0), eps_runs.std(0)
     m_exp, s_exp = exp3_runs.mean(0), exp3_runs.std(0)
 
-    plt.figure(figsize=(8,5))
-    plt.plot(Ts, m_eps, label="ε-EXP3")
-    plt.fill_between(Ts, m_eps - s_eps, m_eps + s_eps, alpha=0.2)
-    plt.plot(Ts, m_exp, label="EXP3")
-    plt.fill_between(Ts, m_exp - s_exp, m_exp + s_exp, alpha=0.2)
-    plt.xlabel("t")
-    plt.ylabel("Time-average regret")
-    plt.title(f"Time-average regret (runs={runs}, pmin={pmin})")
-    # ✅ 压缩 y 轴范围（按当前数据自动设一个窄窗）
-    ymin = min(m_eps.min(), m_exp.min()) - 0.02
-    ymax = max(m_eps.max(), m_exp.max()) + 0.02
-    # 进一步收紧窗口（例如上下各留 0.03 的边距）
-    plt.ylim(max(0, ymin), min(0.25, ymax))  # 你也可以直接写死 plt.ylim(0.04, 0.16)
-    plt.legend()
-    plt.tight_layout()
+    # plt.figure(figsize=(8,5))
+    # plt.plot(Ts, m_eps, label="ε-EXP3")
+    # plt.fill_between(Ts, m_eps - s_eps, m_eps + s_eps, alpha=0.2)
+    # plt.plot(Ts, m_exp, label="EXP3")
+    # plt.fill_between(Ts, m_exp - s_exp, m_exp + s_exp, alpha=0.2)
+    # plt.xlabel("t")
+    # plt.ylabel("Time-average regret")
+    # plt.title(f"Time-average regret (runs={runs}, pmin={pmin})")
+    # # ✅ 压缩 y 轴范围（按当前数据自动设一个窄窗）
+    # ymin = min(m_eps.min(), m_exp.min()) - 0.02
+    # ymax = max(m_eps.max(), m_exp.max()) + 0.02
+    # # 进一步收紧窗口（例如上下各留 0.03 的边距）
+    # plt.ylim(max(0, ymin), min(0.25, ymax))  # 你也可以直接写死 plt.ylim(0.04, 0.16)
+    # plt.legend()
+    # plt.tight_layout()
 
-    # 保存图片到脚本同目录
-    out = OUTDIR / "time_average_regret.png"
-    plt.savefig(out, dpi=200, bbox_inches="tight")
-    if log_to_wandb and run is not None:
-        wandb.log({
-            "fig/time_average_regret": wandb.Image(str(out))
-        })
+    # # 保存图片到脚本同目录
+    # out = OUTDIR / "time_average_regret.png"
+    # plt.savefig(out, dpi=200, bbox_inches="tight")
+    # if log_to_wandb and run is not None:
+    #     wandb.log({
+    #         "fig/time_average_regret": wandb.Image(str(out))
+    #     })
 
-    if show_plots:
-        plt.show()
-    plt.close()
+    # if show_plots:
+    #     plt.show()
+    # plt.close()
 
     if log_to_wandb and run is not None:
         run.finish()
@@ -320,6 +329,9 @@ def transient_plot(T=100000, eta=0.02, eps=0.05, seed=42, show_plots=False, log_
             run_name=f"transient_Ltoy_T{T}_eta{eta}_eps{eps}",
             config=dict(exp="transient", T=T, eta=eta, eps=eps, seed=seed)
         )
+    wandb.define_metric("transient/*", step_metric="t_transient")
+    wandb.define_metric("p_leaf/*", step_metric="t_transient")   # 新增
+
     random.seed(seed); np.random.seed(seed)
     tree = build_toy_tree()
 
@@ -339,90 +351,129 @@ def transient_plot(T=100000, eta=0.02, eps=0.05, seed=42, show_plots=False, log_
     exp_runner = AlgorithmRunner(tree, "exp3",     eta, eps)
 
 
-    from collections import deque
-    W = 1000
-    xs = []
-    r2_eps, n23_eps = [], []
-    r2_exp, n23_exp = [], []
-    win_r2_eps, win_n23_eps = deque(maxlen=W), deque(maxlen=W)
-    win_r2_exp, win_n23_exp = deque(maxlen=W), deque(maxlen=W)
+    # from collections import deque
+    # W = 1000
+    # xs = []
+    # r2_eps, n23_eps = [], []
+    # r2_exp, n23_exp = [], []
+    # win_r2_eps, win_n23_eps = deque(maxlen=W), deque(maxlen=W)
+    # win_r2_exp, win_n23_exp = deque(maxlen=W), deque(maxlen=W)
 
     for t in range(1, T + 1):
         _, _, rec1 = eps_runner.run_one_round(env, t)
         # 记录“根是否选了左子(=1)”
-        if tree.root in rec1:
-            win_r2_eps.append(1 if rec1[tree.root][0] == 1 else 0)
-        # 记录“节点1是否选了3”
-        if 1 in rec1:
-            win_n23_eps.append(1 if rec1[1][0] == 3 else 0)
+        # if tree.root in rec1:
+        #     win_r2_eps.append(1 if rec1[tree.root][0] == 1 else 0)
+        # # 记录“节点1是否选了3”
+        # if 1 in rec1:
+        #     win_n23_eps.append(1 if rec1[1][0] == 3 else 0)
 
+
+        # _, _, rec2 = exp_runner.run_one_round(env, t)
+        # if tree.root in rec2:
+        #     win_r2_exp.append(1 if rec2[tree.root][0] == 1 else 0)
+        # if 1 in rec2:
+        #     win_n23_exp.append(1 if rec2[1][0] == 3 else 0)
+
+        # # 每1k次记录一次概选择概率
+        # if t % 1000 == 0:
+        #     xs.append(t)
+        #     r2_eps.append(np.mean(win_r2_eps) if len(win_r2_eps) else 0.0)
+        #     n23_eps.append(np.mean(win_n23_eps) if len(win_n23_eps) else 0.0)
+        #     r2_exp.append(np.mean(win_r2_exp) if len(win_r2_exp) else 0.0)
+        #     n23_exp.append(np.mean(win_n23_exp) if len(win_n23_exp) else 0.0)
+        #     if log_to_wandb and run is not None:
+        #         wandb.log({
+        #             "t_transient": int(t),
+        #             "transient/root→2/eps":   float(r2_eps[-1]),
+        #             "transient/2→3/eps":      float(n23_eps[-1]),
+        #             "transient/root→2/exp3":  float(r2_exp[-1]),
+        #             "transient/2→3/exp3":     float(n23_exp[-1]),
+        #         })
+        # 即时 0/1 指示：本步是否选到对应分支
+        r2_eps_now  = 1.0 if (tree.root in rec1 and rec1[tree.root][0] == 1) else 0.0
+        n23_eps_now = 1.0 if (1 in rec1         and rec1[1][0]        == 3) else 0.0
+
+        root_eps = eps_runner.nodes[tree.root]
+        p_eps_root = root_eps.probs()[0] if isinstance(root_eps, NodeEpsEXP3) else root_eps.probs()
+        pr_eps_root_to_1 = float(p_eps_root[root_eps.child_ids.index(1)])
+
+        node1_eps = eps_runner.nodes[1]
+        p_eps_n1 = node1_eps.probs()[0] if isinstance(node1_eps, NodeEpsEXP3) else node1_eps.probs()
+        pr_eps_1_to_3 = float(p_eps_n1[node1_eps.child_ids.index(3)])
+
+        root_exp = exp_runner.nodes[tree.root]
+        p_exp_root = root_exp.probs()
+        pr_exp_root_to_1 = float(p_exp_root[root_exp.child_ids.index(1)])
+
+        node1_exp = exp_runner.nodes[1]
+        p_exp_n1 = node1_exp.probs()
+        pr_exp_1_to_3 = float(p_exp_n1[node1_exp.child_ids.index(3)])
 
         _, _, rec2 = exp_runner.run_one_round(env, t)
-        if tree.root in rec2:
-            win_r2_exp.append(1 if rec2[tree.root][0] == 1 else 0)
-        if 1 in rec2:
-            win_n23_exp.append(1 if rec2[1][0] == 3 else 0)
+        r2_exp_now  = 1.0 if (tree.root in rec2 and rec2[tree.root][0] == 1) else 0.0
+        n23_exp_now = 1.0 if (1 in rec2         and rec2[1][0]        == 3) else 0.0
+
+        if log_to_wandb and run is not None:
+            wandb.log({
+                "t_transient": int(t),
+                "transient/root→1/eps":  r2_eps_now,
+                "transient/1→3/eps":     n23_eps_now,
+                "transient/root→1/exp3": r2_exp_now,
+                "transient/1→3/exp3":    n23_exp_now,
+                "probs/eps_root_to_1":  pr_eps_root_to_1,
+                "probs/eps_n1_to_3":    pr_eps_1_to_3,
+                "probs/exp3_root_to_1": pr_exp_root_to_1,
+                "probs/exp3_n1_to_3":   pr_exp_1_to_3,
+                "p_leaf/3": float(env.p_leaf[3]),    # 新增：每步记录叶子3的当前 p
+            })
 
 
-        if t % 1000 == 0:
-            xs.append(t)
-            r2_eps.append(np.mean(win_r2_eps) if len(win_r2_eps) else 0.0)
-            n23_eps.append(np.mean(win_n23_eps) if len(win_n23_eps) else 0.0)
-            r2_exp.append(np.mean(win_r2_exp) if len(win_r2_exp) else 0.0)
-            n23_exp.append(np.mean(win_n23_exp) if len(win_n23_exp) else 0.0)
-            if log_to_wandb and run is not None:
-                wandb.log({
-                    "transient/root→2/eps": float(r2_eps[-1]),
-                    "transient/2→3/eps":    float(n23_eps[-1]),
-                    "transient/root→2/exp3": float(r2_exp[-1]),
-                    "transient/2→3/exp3":    float(n23_exp[-1]),
-                    "t": int(t)
-                }, step=int(t))
 
     # ε-EXP3 图
-    plt.figure(figsize=(7,4))
-    plt.plot(xs, r2_eps, label="Pr(root chooses 2) – ε-EXP3")
-    plt.plot(xs, n23_eps, label="Pr(node2 chooses 3) – ε-EXP3")
-    plt.xlabel("t (averaged over last 1000 rounds)")
-    plt.ylabel("Probability")
-    plt.title("Transient behavior – ε-EXP3")
-    plt.legend()
-    plt.tight_layout()
-    out1 = OUTDIR / "transient_eps.png"
-    plt.savefig(out1, dpi=200, bbox_inches="tight")
+    # plt.figure(figsize=(7,4))
+    # plt.plot(xs, r2_eps, label="Pr(root chooses 1) – ε-EXP3")
+    # plt.plot(xs, n23_eps, label="Pr(node1 chooses 3) – ε-EXP3")
+    # plt.xlabel("t (averaged over last 1000 rounds)")
+    # plt.ylabel("Probability")
+    # plt.title("Transient behavior – ε-EXP3")
+    # plt.legend()
+    # plt.tight_layout()
+    # out1 = OUTDIR / "transient_eps.png"
+    # plt.savefig(out1, dpi=200, bbox_inches="tight")
     
 
-    if show_plots:
-        plt.show()
-    plt.close()
+    # if show_plots:
+    #     plt.show()
+    # plt.close()
 
     # EXP3 图
-    plt.figure(figsize=(7,4))
-    plt.plot(xs, r2_exp, label="Pr(root chooses 2) – EXP3")
-    plt.plot(xs, n23_exp, label="Pr(node2 chooses 3) – EXP3")
-    plt.xlabel("t (averaged over last 1000 rounds)")
-    plt.ylabel("Probability")
-    plt.title("Transient behavior – EXP3")
-    plt.legend()
-    plt.tight_layout()
-    out2 = OUTDIR / "transient_exp3.png"
-    plt.savefig(out2, dpi=200, bbox_inches="tight")
-    if show_plots:
-        plt.show()
-    plt.close()
+    # plt.figure(figsize=(7,4))
+    # plt.plot(xs, r2_exp, label="Pr(root chooses 1) – EXP3")
+    # plt.plot(xs, n23_exp, label="Pr(node1 chooses 3) – EXP3")
+    # plt.xlabel("t (averaged over last 1000 rounds)")
+    # plt.ylabel("Probability")
+    # plt.title("Transient behavior – EXP3")
+    # plt.legend()
+    # plt.tight_layout()
+    # out2 = OUTDIR / "transient_exp3.png"
+    # plt.savefig(out2, dpi=200, bbox_inches="tight")
+    # if show_plots:
+    #     plt.show()
+    # plt.close()
     if log_to_wandb and run is not None:
-        wandb.log({
-            "fig/transient_eps": wandb.Image(str(out1)),
-            "fig/transient_exp3": wandb.Image(str(out2))
-        })
+        # wandb.log({
+        #     "fig/transient_eps": wandb.Image(str(out1)),
+        #     "fig/transient_exp3": wandb.Image(str(out2))
+        # })
         run.finish()
 
 # ---------- Main ----------
 
 if __name__ == "__main__":
     # 可根据机器性能调整 T / runs；默认只保存图片，不弹窗
-    time_average_regret_curve(runs=5, T=1000000, pmin=0.2, eta=0.05, eps=0.08, seed=0, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
-    transient_plot(T=100000, eta=0.05, eps=0.08, seed=42, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
-    print(f"[Saved] {OUTDIR/'time_average_regret1.png'}")
-    print(f"[Saved] {OUTDIR/'transient_eps.png'}")
-    print(f"[Saved] {OUTDIR/'transient_exp3.png'}")
+    time_average_regret_curve(runs=5, T=5000000, pmin=0.2, eta=0.001, eps=0.08, seed=0, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
+    transient_plot(T=5000000, eta=0.001, eps=0.08, seed=42, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
+    # print(f"[Saved] {OUTDIR/'time_average_regret1.png'}")
+    # print(f"[Saved] {OUTDIR/'transient_eps.png'}")
+    # print(f"[Saved] {OUTDIR/'transient_exp3.png'}")

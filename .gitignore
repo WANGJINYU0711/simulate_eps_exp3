@@ -1,0 +1,4 @@
+*.png
+time_average_regret.png
+transient_eps.png
+transient_exp3.png

@@ -128,8 +128,9 @@ def stable_softmax_weights(theta: np.ndarray, eta: float) -> np.ndarray:
     z = eta * (theta - np.max(theta))
     w = np.exp(z)
     s = w.sum()
-    if not np.isfinite(s) or s <= 0:
-        w = np.ones_like(theta)
+    if not np.isfinite(s) or s == 0:
+        z = np.clip(z, -700.0, 0.0)
+        w = np.exp(z)
         s = w.sum()
     p = w / s
     # p = np.maximum(p, 1e-8)  # 防止 0 概率
@@ -152,8 +153,24 @@ class NodeEXP3:
 
     def select(self) -> Tuple[int, np.ndarray, int]:
         p = self.probs()
-        if (not np.isfinite(p).all()) or abs(p.sum() - 1.0) > 1e-6:
-            p = np.ones(self.K) / self.K
+        if not np.isfinite(p).all():
+            # 报错或直接 return 当前 p（让它保持极小但非0）
+            raise FloatingPointError("non-finite probs")
+        if not (0.999999999999 <= p.sum() <= 1.000000000001):
+            p = p / p.sum()   # 仅重归一，不要改成均匀
+        # --- 仅此新增：把过小的概率硬置 0，然后重归一 ---
+        cutoff = 1e-12
+        p = p / p.sum()
+        p0 = p.copy()               # 备份阈值前的分布
+        p[p < cutoff] = 0.0
+        s = p.sum()
+        if s <= 0.0:
+            # 全被砍掉：退到 one-hot 贪心（不做均匀回退）
+            i = int(np.argmax(p0))
+            p = np.zeros_like(p); p[i] = 1.0
+        else:
+            p = p / s
+        # --------------------------------------------------
         idx = np.random.choice(self.K, p=p)
         return self.child_ids[idx], p, idx
 
@@ -472,8 +489,8 @@ def transient_plot(T=100000, eta=0.02, eps=0.05, seed=42, show_plots=False, log_
 
 if __name__ == "__main__":
     # 可根据机器性能调整 T / runs；默认只保存图片，不弹窗
-    time_average_regret_curve(runs=5, T=5000000, pmin=0.2, eta=0.001, eps=0.08, seed=0, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
-    transient_plot(T=5000000, eta=0.001, eps=0.08, seed=42, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
+    #time_average_regret_curve(runs=5, T=5000000, pmin=0.2, eta=0.001, eps=0.08, seed=0, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
+    transient_plot(T=5000000, eta=0.01, eps=0.08, seed=42, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
     # print(f"[Saved] {OUTDIR/'time_average_regret1.png'}")
     # print(f"[Saved] {OUTDIR/'transient_eps.png'}")
     # print(f"[Saved] {OUTDIR/'transient_exp3.png'}")

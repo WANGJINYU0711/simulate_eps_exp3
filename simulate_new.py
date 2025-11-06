@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 from pathlib import Path
+from typing import Set, Optional
+
 
 # 输出目录：脚本同目录
 OUTDIR = Path(__file__).resolve().parent
@@ -120,7 +122,6 @@ class BernoulliEnv:
             # prefix[tt - 1] = min(acc.values())
             prefix[tt - 1] = acc[3]   # 基线固定为叶子3
         return prefix
-
 
 # ---------- Numerically stable softmax ----------
 
@@ -244,11 +245,15 @@ class AlgorithmRunner:
 
 @dataclass
 class PartialShareConfig:
-    eta_leaf: float = 0.02     # 叶子层 softmax 学习率（控制 w = exp(eta_leaf * theta) 的敏感度）
-    eps: float = 0.05          # 节点 ε-教育
-    lr_bandit: float = 1.0     # 路径 bandit 更新步长（用 1/路径概率校正）
-    lr_full: float = 0.2       # 分享时的全信息更新步长（不做 1/p 校正）
-    share_prob: Dict[int, float] = None  # 叶子->分享概率 ρ_ell（也可都是 0/1）
+    eta_leaf: float = 0.02
+    eps: float = 0.05
+    lr_bandit: float = 1.0
+    lr_full: float = 0.2
+    # 【新】手动指定“始终分享”的叶子集合；若给定，则完全忽略 share_prob 的随机决定
+    shared_leaves: Optional[Set[int]] = None
+    # 仍保留：按叶子 -> 概率 ρ_ell 的随机分享（仅当 shared_leaves is None 时才会用到）
+    share_prob: Dict[int, float] = None
+
 
 class TreeAggregator:
     """
@@ -389,17 +394,21 @@ class TreeAggregator:
                 c = self.next_child[(i, leaf)]
                 self.S_unshared[(i, c)] += delta_path
 
-        # 2) 分享与否
-        rho = 0.0
-        if self.cfg.share_prob is not None:
-            rho = self.cfg.share_prob.get(leaf, 0.0)
-        share = (random.random() < rho)
+        # 2) 分享与否（先看是否提供了手动集合）
+        if self.cfg.shared_leaves is not None:
+            share = (leaf in self.cfg.shared_leaves)
+        else:
+            rho = 0.0
+            if self.cfg.share_prob is not None:
+                rho = self.cfg.share_prob.get(leaf, 0.0)
+            share = (random.random() < rho)
 
+        # ★★★ 缺失的核心一步：当 share 时做一次“全信息”更新到 S_shared
         if share:
-            # 全信息再走一步：θ ← θ - lr_full * cost
             theta2 = self.theta_leaf[leaf] - self.cfg.lr_full * cost
-            # 这个增量“全量”计入 shared（所有祖先，包括没在本轮路径上的）
             self._apply_theta_change(leaf, theta2, is_shared_update=True)
+
+
 
 class AlgorithmPartialShare:
     """
@@ -495,7 +504,7 @@ def time_average_regret_curve(runs=5, T=50000, pmin=0.4, eta=0.02, eps=0.05,
         # 例：3号叶子总是分享，其它不分享；你也可以改成 {ell:1.0 for ell in tree.leaves}
         ps_cfg = PartialShareConfig(
             eta_leaf=0.02, lr_bandit=1.0, lr_full=0.2,
-            share_prob={3: 1.0, 4: 0.0, 5: 0.0, 6: 0.0}
+            shared_leaves={3,4,5,6}   # ← 仅叶子 3 分享；4/5/6 不分享
         )
         ps_runner = AlgorithmRunnerPS(tree, ps_cfg)
 
@@ -515,11 +524,11 @@ def time_average_regret_curve(runs=5, T=50000, pmin=0.4, eta=0.02, eps=0.05,
         return np.array(regrets)
 
     # 多次独立运行求均值/方差。
-    eps_runs = np.stack([one("eps-exp3", r+1,      log_this=(r==0)) for r in range(runs)], 0)
-    exp3_runs = np.stack([one("exp3",    r+1,      log_this=(r==0)) for r in range(runs)], 0)
+    # eps_runs = np.stack([one("eps-exp3", r+1,      log_this=(r==0)) for r in range(runs)], 0)
+    # exp3_runs = np.stack([one("exp3",    r+1,      log_this=(r==0)) for r in range(runs)], 0)
     ps_runs  = np.stack([one_ps(        r+1,      log_this=(r==0)) for r in range(runs)], 0)
-    m_eps, s_eps = eps_runs.mean(0), eps_runs.std(0)
-    m_exp, s_exp = exp3_runs.mean(0), exp3_runs.std(0)
+    # m_eps, s_eps = eps_runs.mean(0), eps_runs.std(0)
+    # m_exp, s_exp = exp3_runs.mean(0), exp3_runs.std(0)
     m_ps,  s_ps  = ps_runs.mean(0),   ps_runs.std(0)
 
     if log_to_wandb and run is not None:
@@ -552,44 +561,46 @@ def transient_plot(T=100000, eta=0.02, eps=0.05, seed=42, show_plots=False, log_
 
     env = BernoulliEnv(tree, p_leaf=p_leaf,
                    change_at=change_at, change_leaf=change_leaf, p_new=p_new)
-    eps_runner = AlgorithmRunner(tree, "eps-exp3", eta, eps)
-    exp_runner = AlgorithmRunner(tree, "exp3",     eta, eps)
+    # eps_runner = AlgorithmRunner(tree, "eps-exp3", eta, eps)
+    # exp_runner = AlgorithmRunner(tree, "exp3",     eta, eps)
     ps_cfg = PartialShareConfig(
         eta_leaf=0.02, lr_bandit=1.0, lr_full=0.2,
-        share_prob={3: 1.0, 4: 0.0, 5: 0.0, 6: 0.0})
+        shared_leaves={3,4,5,6}
+    )
     ps_runner = AlgorithmRunnerPS(tree, ps_cfg)
 
+
     for t in range(1, T + 1):
-        _, _, rec1 = eps_runner.run_one_round(env, t)
-        _, _, rec2 = exp_runner.run_one_round(env, t)
+        # _, _, rec1 = eps_runner.run_one_round(env, t)
+        # _, _, rec2 = exp_runner.run_one_round(env, t)
         _, _, rec3 = ps_runner.run_one_round(env, t)   # ← 新增：PS
 
-        r2_eps_now  = 1.0 if (tree.root in rec1 and rec1[tree.root][0] == 1) else 0.0
-        n23_eps_now = 1.0 if (1 in rec1         and rec1[1][0]        == 3) else 0.0
-        r2_exp_now  = 1.0 if (tree.root in rec2 and rec2[tree.root][0] == 1) else 0.0
-        n23_exp_now = 1.0 if (1 in rec2         and rec2[1][0]        == 3) else 0.0
+        # r2_eps_now  = 1.0 if (tree.root in rec1 and rec1[tree.root][0] == 1) else 0.0
+        # n23_eps_now = 1.0 if (1 in rec1         and rec1[1][0]        == 3) else 0.0
+        # r2_exp_now  = 1.0 if (tree.root in rec2 and rec2[tree.root][0] == 1) else 0.0
+        # n23_exp_now = 1.0 if (1 in rec2         and rec2[1][0]        == 3) else 0.0
 
         # --- PS 的即时命中 ---
         r2_ps_now   = 1.0 if (tree.root in rec3 and rec3[tree.root][0] == 1) else 0.0
         n23_ps_now  = 1.0 if (1 in rec3         and rec3[1][0]        == 3) else 0.0
 
         # 概率（本轮用于采样的 p 向量直接从 record 里拿）
-        p_eps_root_vec = rec1[tree.root][1]
-        pr_eps_root_to_1 = float(p_eps_root_vec[ eps_runner.nodes[tree.root].child_ids.index(1) ])
-        p_exp_root_vec = rec2[tree.root][1]
-        pr_exp_root_to_1 = float(p_exp_root_vec[ exp_runner.nodes[tree.root].child_ids.index(1) ])
+        # p_eps_root_vec = rec1[tree.root][1]
+        # pr_eps_root_to_1 = float(p_eps_root_vec[ eps_runner.nodes[tree.root].child_ids.index(1) ])
+        # p_exp_root_vec = rec2[tree.root][1]
+        # pr_exp_root_to_1 = float(p_exp_root_vec[ exp_runner.nodes[tree.root].child_ids.index(1) ])
 
-        if 1 in rec1:
-            p_eps_n1_vec = rec1[1][1]
-            pr_eps_1_to_3 = float(p_eps_n1_vec[ eps_runner.nodes[1].child_ids.index(3) ])
-        else:
-            pr_eps_1_to_3 = float('nan')
+        # if 1 in rec1:
+        #     p_eps_n1_vec = rec1[1][1]
+        #     pr_eps_1_to_3 = float(p_eps_n1_vec[ eps_runner.nodes[1].child_ids.index(3) ])
+        # else:
+        #     pr_eps_1_to_3 = float('nan')
 
-        if 1 in rec2:
-            p_exp_n1_vec = rec2[1][1]
-            pr_exp_1_to_3 = float(p_exp_n1_vec[ exp_runner.nodes[1].child_ids.index(3) ])
-        else:
-            pr_exp_1_to_3 = float('nan')
+        # if 1 in rec2:
+        #     p_exp_n1_vec = rec2[1][1]
+        #     pr_exp_1_to_3 = float(p_exp_n1_vec[ exp_runner.nodes[1].child_ids.index(3) ])
+        # else:
+        #     pr_exp_1_to_3 = float('nan')
 
         # --- PS 的概率（注意：PS 没有 nodes[]，取孩子列表用 ps_runner.algo.agg.children[...]）---
         if tree.root in rec3:
@@ -608,14 +619,14 @@ def transient_plot(T=100000, eta=0.02, eps=0.05, seed=42, show_plots=False, log_
             wandb.log({
                 "t_transient": int(t),
                 # 之前就有的 ε/EXP3：
-                "transient/root→1/eps":  r2_eps_now,
-                "transient/1→3/eps":     n23_eps_now,
-                "transient/root→1/exp3": r2_exp_now,
-                "transient/1→3/exp3":    n23_exp_now,
-                "probs/eps_root_to_1":  pr_eps_root_to_1,
-                "probs/eps_n1_to_3":    pr_eps_1_to_3,
-                "probs/exp3_root_to_1": pr_exp_root_to_1,
-                "probs/exp3_n1_to_3":   pr_exp_1_to_3,
+                # "transient/root→1/eps":  r2_eps_now,
+                # "transient/1→3/eps":     n23_eps_now,
+                # "transient/root→1/exp3": r2_exp_now,
+                # "transient/1→3/exp3":    n23_exp_now,
+                # "probs/eps_root_to_1":  pr_eps_root_to_1,
+                # "probs/eps_n1_to_3":    pr_eps_1_to_3,
+                # "probs/exp3_root_to_1": pr_exp_root_to_1,
+                # "probs/exp3_n1_to_3":   pr_exp_1_to_3,
                 "p_leaf/3": float(env.p_leaf[3]),
                 # 新增：PS
                 "transient/root→1/ps":  r2_ps_now,

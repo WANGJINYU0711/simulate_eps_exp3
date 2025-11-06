@@ -158,19 +158,19 @@ class NodeEXP3:
             raise FloatingPointError("non-finite probs")
         if not (0.999999999999 <= p.sum() <= 1.000000000001):
             p = p / p.sum()   # 仅重归一，不要改成均匀
-        # --- 仅此新增：把过小的概率硬置 0，然后重归一 ---
-        cutoff = 1e-12
-        p = p / p.sum()
-        p0 = p.copy()               # 备份阈值前的分布
-        p[p < cutoff] = 0.0
-        s = p.sum()
-        if s <= 0.0:
-            # 全被砍掉：退到 one-hot 贪心（不做均匀回退）
-            i = int(np.argmax(p0))
-            p = np.zeros_like(p); p[i] = 1.0
-        else:
-            p = p / s
-        # --------------------------------------------------
+        # # --- 仅此新增：把过小的概率硬置 0，然后重归一 ---
+        # cutoff = 1e-12
+        # p = p / p.sum()
+        # p0 = p.copy()               # 备份阈值前的分布
+        # p[p < cutoff] = 0.0
+        # s = p.sum()
+        # if s <= 0.0:
+        #     # 全被砍掉：退到 one-hot 贪心（不做均匀回退）
+        #     i = int(np.argmax(p0))
+        #     p = np.zeros_like(p); p[i] = 1.0
+        # else:
+        #     p = p / s
+        # # --------------------------------------------------
         idx = np.random.choice(self.K, p=p)
         return self.child_ids[idx], p, idx
 
@@ -228,13 +228,17 @@ class AlgorithmRunner:
         u = self.tree.root
         while not self.tree.is_leaf(u):
             node = self.nodes[u]
-            child, local_probs, idx = node.select()
-            record[u] = (child, float(local_probs[idx]), idx)
+            # child, local_probs, idx = node.select()
+            # record[u] = (child, float(local_probs[idx]), idx)
+            child, p_vec, idx = node.select()
+            record[u] = (child, p_vec, idx)
             u = child
         leaf = u
         cost = env.draw_cost(t, leaf)
-        for i, (_, lp, idx) in record.items():
-            self.nodes[i].update(idx, cost, lp)
+        # for i, (_, lp, idx) in record.items():
+        #     self.nodes[i].update(idx, cost, lp)
+        for i, (_, p_vec, idx) in record.items():
+            self.nodes[i].update(idx, cost, float(p_vec[idx]))
         return leaf, cost, record
 
 # ---------- Experiments ----------
@@ -378,6 +382,7 @@ def transient_plot(T=100000, eta=0.02, eps=0.05, seed=42, show_plots=False, log_
 
     for t in range(1, T + 1):
         _, _, rec1 = eps_runner.run_one_round(env, t)
+        _, _, rec2 = exp_runner.run_one_round(env, t)
         # 记录“根是否选了左子(=1)”
         # if tree.root in rec1:
         #     win_r2_eps.append(1 if rec1[tree.root][0] == 1 else 0)
@@ -410,26 +415,45 @@ def transient_plot(T=100000, eta=0.02, eps=0.05, seed=42, show_plots=False, log_
         # 即时 0/1 指示：本步是否选到对应分支
         r2_eps_now  = 1.0 if (tree.root in rec1 and rec1[tree.root][0] == 1) else 0.0
         n23_eps_now = 1.0 if (1 in rec1         and rec1[1][0]        == 3) else 0.0
-
-        root_eps = eps_runner.nodes[tree.root]
-        p_eps_root = root_eps.probs()[0] if isinstance(root_eps, NodeEpsEXP3) else root_eps.probs()
-        pr_eps_root_to_1 = float(p_eps_root[root_eps.child_ids.index(1)])
-
-        node1_eps = eps_runner.nodes[1]
-        p_eps_n1 = node1_eps.probs()[0] if isinstance(node1_eps, NodeEpsEXP3) else node1_eps.probs()
-        pr_eps_1_to_3 = float(p_eps_n1[node1_eps.child_ids.index(3)])
-
-        root_exp = exp_runner.nodes[tree.root]
-        p_exp_root = root_exp.probs()
-        pr_exp_root_to_1 = float(p_exp_root[root_exp.child_ids.index(1)])
-
-        node1_exp = exp_runner.nodes[1]
-        p_exp_n1 = node1_exp.probs()
-        pr_exp_1_to_3 = float(p_exp_n1[node1_exp.child_ids.index(3)])
-
-        _, _, rec2 = exp_runner.run_one_round(env, t)
         r2_exp_now  = 1.0 if (tree.root in rec2 and rec2[tree.root][0] == 1) else 0.0
         n23_exp_now = 1.0 if (1 in rec2         and rec2[1][0]        == 3) else 0.0
+
+        # root_eps = eps_runner.nodes[tree.root]
+        # p_eps_root = root_eps.probs()[0] if isinstance(root_eps, NodeEpsEXP3) else root_eps.probs()
+        # pr_eps_root_to_1 = float(p_eps_root[root_eps.child_ids.index(1)])
+
+        # node1_eps = eps_runner.nodes[1]
+        # p_eps_n1 = node1_eps.probs()[0] if isinstance(node1_eps, NodeEpsEXP3) else node1_eps.probs()
+        # pr_eps_1_to_3 = float(p_eps_n1[node1_eps.child_ids.index(3)])
+
+        p_eps_root_vec = rec1[tree.root][1]
+        pr_eps_root_to_1 = float(p_eps_root_vec[ eps_runner.nodes[tree.root].child_ids.index(1) ])
+
+
+        # root_exp = exp_runner.nodes[tree.root]
+        # p_exp_root = root_exp.probs()
+        # pr_exp_root_to_1 = float(p_exp_root[root_exp.child_ids.index(1)])
+
+        # node1_exp = exp_runner.nodes[1]
+        # p_exp_n1 = node1_exp.probs()
+        # pr_exp_1_to_3 = float(p_exp_n1[node1_exp.child_ids.index(3)])
+        
+        # EXP3
+        p_exp_root_vec = rec2[tree.root][1]
+        pr_exp_root_to_1 = float(p_exp_root_vec[ exp_runner.nodes[tree.root].child_ids.index(1) ])
+
+        # --- 新增：节点 1 可能没走到，先判断是否在 rec 中 ---
+        if 1 in rec1:
+            p_eps_n1_vec = rec1[1][1]
+            pr_eps_1_to_3 = float(p_eps_n1_vec[ eps_runner.nodes[1].child_ids.index(3) ])
+        else:
+            pr_eps_1_to_3 = float('nan')   # 或者用 -1 作为占位
+
+        if 1 in rec2:
+            p_exp_n1_vec = rec2[1][1]
+            pr_exp_1_to_3 = float(p_exp_n1_vec[ exp_runner.nodes[1].child_ids.index(3) ])
+        else:
+            pr_exp_1_to_3 = float('nan')   # 或者用 -1 作为占位
 
         if log_to_wandb and run is not None:
             wandb.log({
@@ -489,8 +513,8 @@ def transient_plot(T=100000, eta=0.02, eps=0.05, seed=42, show_plots=False, log_
 
 if __name__ == "__main__":
     # 可根据机器性能调整 T / runs；默认只保存图片，不弹窗
-    #time_average_regret_curve(runs=5, T=5000000, pmin=0.2, eta=0.001, eps=0.08, seed=0, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
-    transient_plot(T=5000000, eta=0.01, eps=0.08, seed=42, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
+    time_average_regret_curve(runs=5, T=5000000, pmin=0.2, eta=0.001, eps=0.08, seed=0, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
+    transient_plot(T=5000000, eta=0.001, eps=0.08, seed=42, show_plots=False, log_to_wandb=True, wandb_project="multistage-bandit")
     # print(f"[Saved] {OUTDIR/'time_average_regret1.png'}")
     # print(f"[Saved] {OUTDIR/'transient_eps.png'}")
     # print(f"[Saved] {OUTDIR/'transient_exp3.png'}")

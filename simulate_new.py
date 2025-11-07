@@ -251,9 +251,6 @@ class PartialShareConfig:
     lr_full: float = 0.2
     # 【新】手动指定“始终分享”的叶子集合；若给定，则完全忽略 share_prob 的随机决定
     shared_leaves: Optional[Set[int]] = None
-    # 仍保留：按叶子 -> 概率 ρ_ell 的随机分享（仅当 shared_leaves is None 时才会用到）
-    share_prob: Dict[int, float] = None
-
 
 class TreeAggregator:
     """
@@ -361,54 +358,49 @@ class TreeAggregator:
             path.append(u)
         return path, record
 
-    def update_after_observe(self, t: int, leaf: int, cost: float, record: Dict[int, Tuple[int, float, int]]):
+    def update_after_observe(self, t: int, leaf: int, cost: float,
+                            record: Dict[int, Tuple[int, float, int]]) -> None:
         """
-        观察代价后：决定“是否分享”，并做增量传播。
-        - 不分享：仅沿当前路径的祖先做 bandit-type（1/路径概率校正）更新到 S_unshared；
-        - 分享：额外对“所有祖先”（包括不是本轮路径上的祖先）做一次全信息更新到 S_shared。
+        同步策略（互斥）：
+        - 若 leaf ∈ shared_leaves：做一次“全信息”更新到 S_shared（所有祖先边），
+        本轮不再做 S_unshared，避免双重记账。
+        - 否则：仅对“本轮路径上的祖先”做 bandit 无偏估计更新到 S_unshared。
         """
-        # 路径概率（bandit 无偏估计用）
+        # 计算路径概率（bandit 用）
         path_prob = 1.0
         for (_, p_vec, idx) in record.values():
             path_prob *= max(float(p_vec[idx]), 1e-12)
 
+        shared_set = self.cfg.shared_leaves or set()
 
-        # 1) bandit 更新（作用到 unshared 通道）
-        ghat = self.cfg.lr_bandit * (cost / max(path_prob, 1e-12))
-        theta_new = self.theta_leaf[leaf] - ghat
-        # 注意：bandit 更新只对“路径上的祖先”有意义——我们通过作用到 S_unshared 来建模
-        # 这里为了“仅路径祖先”更新，我们先把 delta 按 unshared 通道加上，
-        # 但为了实现“仅路径”，我们先移除对其他祖先的影响：做一个“小技巧”：先整体按 unshared 加，
-        # 再把“不在本轮路径里的祖先边”的 delta 撤销回 shared（保持和为 0）。更简单的做法是：
-        # ——我们先暂存 w_old/w_new，然后仅对“路径祖先”遍历累加，这里采用后者实现。
+        if leaf in shared_set:
+            # —— 全信息：对所有祖先广播到 S_shared —— #
+            theta_old = self.theta_leaf[leaf]
+            w_old = self.w_leaf[leaf]
 
-        # 只对“路径上的祖先”做 unshared 增量
-        w_old = self.w_leaf[leaf]
-        w_tmp = float(np.exp(self.cfg.eta_leaf * theta_new))
-        delta_path = w_tmp - w_old
-        self.theta_leaf[leaf] = theta_new
-        self.w_leaf[leaf] = w_tmp
-        for i in self.ancestors[leaf]:
-            # 是否为“本轮实际经过的祖先”
-            if i in record:
-                c = self.next_child[(i, leaf)]
-                self.S_unshared[(i, c)] += delta_path
+            theta_new = theta_old - self.cfg.lr_full * cost
+            # 统一用已有封装：会计算 w_new 并把增量加到 S_shared 的所有祖先边
+            self._apply_theta_change(leaf, theta_new, is_shared_update=True)
 
-        # 2) 分享与否（先看是否提供了手动集合）
-        if self.cfg.shared_leaves is not None:
-            share = (leaf in self.cfg.shared_leaves)
+            # （不再做 bandit 的 S_unshared，避免 double counting）
+
         else:
-            rho = 0.0
-            if self.cfg.share_prob is not None:
-                rho = self.cfg.share_prob.get(leaf, 0.0)
-            share = (random.random() < rho)
+            # —— 仅 bandit：只更新“本轮经过的祖先”的 S_unshared —— #
+            theta_old = self.theta_leaf[leaf]
+            w_old = self.w_leaf[leaf]
 
-        # ★★★ 缺失的核心一步：当 share 时做一次“全信息”更新到 S_shared
-        if share:
-            theta2 = self.theta_leaf[leaf] - self.cfg.lr_full * cost
-            self._apply_theta_change(leaf, theta2, is_shared_update=True)
+            ghat = self.cfg.lr_bandit * (cost / max(path_prob, 1e-12))
+            theta_new = theta_old - ghat
 
+            w_new = float(np.exp(self.cfg.eta_leaf * theta_new))
+            self.theta_leaf[leaf] = theta_new
+            self.w_leaf[leaf] = w_new
+            delta_path = w_new - w_old
 
+            for i in self.ancestors[leaf]:
+                if i in record:  # 只限于本轮路径上的祖先
+                    c = self.next_child[(i, leaf)]
+                    self.S_unshared[(i, c)] += delta_path
 
 class AlgorithmPartialShare:
     """
@@ -504,7 +496,7 @@ def time_average_regret_curve(runs=5, T=50000, pmin=0.4, eta=0.02, eps=0.05,
         # 例：3号叶子总是分享，其它不分享；你也可以改成 {ell:1.0 for ell in tree.leaves}
         ps_cfg = PartialShareConfig(
             eta_leaf=0.02, lr_bandit=1.0, lr_full=0.2,
-            shared_leaves={3,4,5,6}   # ← 仅叶子 3 分享；4/5/6 不分享
+            shared_leaves={3}   #全分享
         )
         ps_runner = AlgorithmRunnerPS(tree, ps_cfg)
 
